@@ -1,4 +1,4 @@
-#include "pch.h"
+﻿#include "pch.h"
 #include "resource.h"
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -14,7 +14,7 @@ bool g_bDebugMode = false;
 const wchar_t *g_wExplorerName = L"explorer.exe";
 const wchar_t *g_wProgramManagerName = L"Program Manager";
 
-int main()
+int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ PWSTR pCmdLine, _In_ int nCmdShow)
 {
 	HANDLE hMutex = OpenMutex(MUTEX_ALL_ACCESS, 0, L"KillAllWindowsMutex");
 	
@@ -24,8 +24,12 @@ int main()
 		return 0;
 	}
 
-	HWND hwndConsole = GetConsoleWindow();
-	ShowWindow(hwndConsole, g_bDebugMode ? SW_SHOW : SW_HIDE);
+	if (g_bDebugMode) {
+		AllocConsole();
+		FILE* pFile;
+		freopen_s(&pFile, "CONOUT$", "w", stdout);
+		std::wcout << "KillAllWindows started" << std::endl;
+	}
 
 	g_hKillCursor = 0;
 	g_hwndCursor = NULL;
