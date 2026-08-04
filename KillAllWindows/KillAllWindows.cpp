@@ -1,12 +1,20 @@
 ﻿#include "pch.h"
 #include "resource.h"
 
+#define WM_TRAYICON (WM_APP + 1)
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK CursorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
+INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 void KillWindowUnderCursor();
+void AddTrayIcon(HWND hWnd);
+void RemoveTrayIcon();
+void ShowTrayMenu(HWND hWnd);
 
 HINSTANCE g_hInstance = NULL;
 HCURSOR g_hKillCursor = NULL;
+NOTIFYICONDATA g_nid = { 0 };
 wchar_t g_wBuf[MAX_PATH];
 WNDCLASS g_wndClsCursor;
 HWND g_hwndCursor;
@@ -48,7 +56,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
 	if (!CreateWindow(mainWindowCls.lpszClassName,
 		L"Kill All Windows",
 		WS_POPUP,
-		0, 0, 100, 100, HWND_MESSAGE, 0, g_hInstance, NULL))
+		0, 0, 100, 100, NULL, 0, g_hInstance, NULL))
 		return 2;
 
 	g_wndClsCursor = { 0 };
@@ -75,11 +83,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	{
 	case WM_CREATE:
 		RegisterHotKey(hWnd, 100, MOD_WIN | MOD_SHIFT, 'K');
+		AddTrayIcon(hWnd);
 		break;
-	case WM_SETCURSOR:
-		SetCursor(g_hKillCursor);
+	case WM_TRAYICON:
+		if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_LBUTTONUP) {
+			ShowTrayMenu(hWnd);
+		}
+		break;
+	case WM_COMMAND:
+		switch (LOWORD(wParam)) {
+		case IDM_OPTIONS:
+			DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_OPTIONS), hWnd, OptionsDlgProc);
+			break;
+		case IDM_ABOUT:
+			DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_ABOUT), hWnd, AboutDlgProc);
+			break;
+		case IDM_EXIT:
+			if (MessageBox(hWnd, L"Close Kill All Windows?", L"Kill All Windows",
+				MB_OKCANCEL | MB_ICONQUESTION) == IDOK) {
+				DestroyWindow(hWnd);
+			}
+			break;
+		}
 		break;
 	case WM_CLOSE:
+		DestroyWindow(hWnd);
+		break;
+	case WM_DESTROY:
+		RemoveTrayIcon();
 		PostQuitMessage(0);
 		break;
 	case WM_HOTKEY:
@@ -199,4 +230,78 @@ void KillWindowUnderCursor()
 			CloseHandle(processHandle);
 		}
 	}
+}
+
+void AddTrayIcon(HWND hWnd)
+{
+	g_nid = { 0 };
+	g_nid.cbSize = sizeof(g_nid);
+	g_nid.hWnd = hWnd;
+	g_nid.uID = 1;
+	g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+	g_nid.uCallbackMessage = WM_TRAYICON;
+	g_nid.hIcon = LoadIcon(g_hInstance, MAKEINTRESOURCE(IDI_ICON1));
+	lstrcpy(g_nid.szTip, L"Kill All Windows");
+	Shell_NotifyIcon(NIM_ADD, &g_nid);
+}
+
+void RemoveTrayIcon()
+{
+	Shell_NotifyIcon(NIM_DELETE, &g_nid);
+}
+
+void ShowTrayMenu(HWND hWnd)
+{
+	POINT pt;
+	GetCursorPos(&pt);
+
+	HMENU hMenu = CreatePopupMenu();
+	AppendMenu(hMenu, MF_STRING, IDM_OPTIONS, L"Options");
+	AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+	AppendMenu(hMenu, MF_STRING, IDM_ABOUT, L"About");
+	AppendMenu(hMenu, MF_STRING, IDM_EXIT, L"Exit");
+
+	// Required so the menu dismisses correctly when the user clicks elsewhere.
+	SetForegroundWindow(hWnd);
+	TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
+	PostMessage(hWnd, WM_NULL, 0, 0);
+	DestroyMenu(hMenu);
+}
+
+INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	switch (message)
+	{
+	case WM_INITDIALOG:
+		return (INT_PTR)TRUE;
+	case WM_COMMAND:
+		if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
+			EndDialog(hDlg, LOWORD(wParam));
+			return (INT_PTR)TRUE;
+		}
+		break;
+	case WM_CLOSE:
+		EndDialog(hDlg, IDCANCEL);
+		return (INT_PTR)TRUE;
+	}
+	return (INT_PTR)FALSE;
+}
+
+INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	switch (message)
+	{
+	case WM_INITDIALOG:
+		return (INT_PTR)TRUE;
+	case WM_COMMAND:
+		if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
+			EndDialog(hDlg, LOWORD(wParam));
+			return (INT_PTR)TRUE;
+		}
+		break;
+	case WM_CLOSE:
+		EndDialog(hDlg, IDCANCEL);
+		return (INT_PTR)TRUE;
+	}
+	return (INT_PTR)FALSE;
 }
