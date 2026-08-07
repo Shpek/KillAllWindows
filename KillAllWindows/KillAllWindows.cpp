@@ -30,6 +30,8 @@ HCURSOR LoadKillCursor();
 void ApplyHotkey(HWND hWnd);
 void HotkeyToText(UINT mods, UINT vk, wchar_t *buf, int cch);
 LRESULT CALLBACK CaptureKeyHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+bool IsAutoStartEnabled();
+void SetAutoStart(bool enable);
 void LoadOptions();
 void SaveOptions();
 
@@ -54,6 +56,8 @@ UINT g_uCaptureVk = 0;
 UINT g_uCaptureModMask = 0;
 Options g_options = { false };
 const wchar_t *g_wRegKey = L"Software\\FSC\\KillAllWindows";
+const wchar_t *g_wRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const wchar_t *g_wRunValue = L"KillAllWindows";
 const wchar_t *g_wExplorerName = L"explorer.exe";
 const wchar_t *g_wProgramManagerName = L"Program Manager";
 const wchar_t *g_wOverlayClassName = L"KillAllWindowsOverlay";
@@ -508,7 +512,12 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 	{
 	case WM_INITDIALOG:
 	{
+		HICON hIcon = LoadIcon(g_hInstance, MAKEINTRESOURCE(IDI_ICON1));
+		SendMessage(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+		SendMessage(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+
 		CheckDlgButton(hDlg, IDC_ASK_CONFIRM, g_options.bAskConfirmation ? BST_CHECKED : BST_UNCHECKED);
+		CheckDlgButton(hDlg, IDC_START_WITH_WINDOWS, IsAutoStartEnabled() ? BST_CHECKED : BST_UNCHECKED);
 		SetDlgItemText(hDlg, IDC_CURSOR_PATH, g_options.wCursorPath);
 
 		CheckDlgButton(hDlg, IDC_HOTKEY_ENABLE, g_options.bHotkeyEnabled ? BST_CHECKED : BST_UNCHECKED);
@@ -597,6 +606,7 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 		}
 		if (LOWORD(wParam) == IDOK) {
 			g_options.bAskConfirmation = IsDlgButtonChecked(hDlg, IDC_ASK_CONFIRM) == BST_CHECKED;
+			SetAutoStart(IsDlgButtonChecked(hDlg, IDC_START_WITH_WINDOWS) == BST_CHECKED);
 			GetDlgItemText(hDlg, IDC_CURSOR_PATH, g_options.wCursorPath, _countof(g_options.wCursorPath));
 			g_options.bHotkeyEnabled = IsDlgButtonChecked(hDlg, IDC_HOTKEY_ENABLE) == BST_CHECKED;
 			g_options.uHotkeyMods = g_uCaptureMods;
@@ -707,6 +717,39 @@ void SaveOptions()
 		dwValue = g_options.uHotkeyVk;
 		RegSetValueEx(hKey, L"HotkeyVk", 0, REG_DWORD, (const BYTE*)&dwValue, sizeof(dwValue));
 
+		RegCloseKey(hKey);
+	}
+}
+
+bool IsAutoStartEnabled()
+{
+	bool enabled = false;
+
+	HKEY hKey;
+	if (RegOpenKeyEx(HKEY_CURRENT_USER, g_wRunKey, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+		enabled = RegQueryValueEx(hKey, g_wRunValue, NULL, NULL, NULL, NULL) == ERROR_SUCCESS;
+		RegCloseKey(hKey);
+	}
+
+	return enabled;
+}
+
+void SetAutoStart(bool enable)
+{
+	HKEY hKey;
+	if (RegOpenKeyEx(HKEY_CURRENT_USER, g_wRunKey, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+		if (enable) {
+			wchar_t path[MAX_PATH];
+			DWORD len = GetModuleFileName(NULL, path, _countof(path));
+			if (len > 0 && len < _countof(path)) {
+				wchar_t quoted[MAX_PATH + 2];
+				_snwprintf_s(quoted, _countof(quoted), _TRUNCATE, L"\"%s\"", path);
+				RegSetValueEx(hKey, g_wRunValue, 0, REG_SZ, (const BYTE*)quoted,
+					(lstrlen(quoted) + 1) * sizeof(wchar_t));
+			}
+		} else {
+			RegDeleteValue(hKey, g_wRunValue);
+		}
 		RegCloseKey(hKey);
 	}
 }
