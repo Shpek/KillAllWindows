@@ -11,6 +11,7 @@ struct Options {
 };
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
@@ -22,17 +23,18 @@ void ShowTrayMenu(HWND hWnd);
 void EnterKillMode();
 void ExitKillMode();
 HCURSOR LoadKillCursor();
-LONG WINAPI CrashHandler(EXCEPTION_POINTERS *pExceptionInfo);
 void LoadOptions();
 void SaveOptions();
 
 HINSTANCE g_hInstance = NULL;
 HCURSOR g_hKillCursor = NULL;
+HCURSOR g_hActiveKillCursor = NULL;
 HHOOK g_hMouseHook = NULL;
 HHOOK g_hKeyboardHook = NULL;
 NOTIFYICONDATA g_nid = { 0 };
 wchar_t g_wBuf[MAX_PATH];
 HWND g_hwndMain = NULL;
+HWND g_hwndOverlay = NULL;
 bool g_bDebugMode = false;
 bool g_bConfirming = false;
 bool g_bKillMode = false;
@@ -42,11 +44,7 @@ Options g_options = { false };
 const wchar_t *g_wRegKey = L"Software\\FSC\\KillAllWindows";
 const wchar_t *g_wExplorerName = L"explorer.exe";
 const wchar_t *g_wProgramManagerName = L"Program Manager";
-const int g_ocrCursors[] = {
-	OCR_NORMAL, OCR_IBEAM, OCR_WAIT, OCR_CROSS, OCR_UP,
-	OCR_SIZENWSE, OCR_SIZENESW, OCR_SIZEWE, OCR_SIZENS, OCR_SIZEALL,
-	OCR_NO, OCR_HAND, OCR_APPSTARTING
-};
+const wchar_t *g_wOverlayClassName = L"KillAllWindowsOverlay";
 
 int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ PWSTR pCmdLine, _In_ int nCmdShow)
 {
@@ -67,11 +65,6 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
 
 	LoadOptions();
 
-	// Restore cursors if a crash restores them; and heal a stuck cursor left by
-	// a previous run that was hard-killed (e.g. from Task Manager) in kill mode.
-	SetUnhandledExceptionFilter(CrashHandler);
-	SystemParametersInfo(SPI_SETCURSORS, 0, NULL, SPIF_SENDCHANGE);
-
 	g_hInstance = GetModuleHandle(NULL);
 	g_hKillCursor = LoadCursor(g_hInstance, MAKEINTRESOURCE(IDC_CURSOR1));
 	MSG msg = { 0 };
@@ -82,6 +75,16 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
 	mainWindowCls.lpszClassName = L"KillAllWindows";
 
 	if (!RegisterClass(&mainWindowCls)) {
+		return 1;
+	}
+
+	WNDCLASS overlayCls = { 0 };
+	overlayCls.lpfnWndProc = OverlayWndProc;
+	overlayCls.hInstance = g_hInstance;
+	overlayCls.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+	overlayCls.lpszClassName = g_wOverlayClassName;
+
+	if (!RegisterClass(&overlayCls)) {
 		return 1;
 	}
 
@@ -143,9 +146,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		EnterKillMode();
 		break;
 	case WM_APP_KILL:
+		// Hide the overlay so WindowFromPoint finds the real target beneath it.
+		ShowWindow(g_hwndOverlay, SW_HIDE);
 		KillWindowUnderCursor(g_ptKill);
 
-		if (!g_bMultiKill) {
+		if (g_bMultiKill) {
+			ShowWindow(g_hwndOverlay, SW_SHOWNOACTIVATE);
+		} else {
 			ExitKillMode();
 		}
 		break;
@@ -207,6 +214,18 @@ HCURSOR LoadKillCursor()
 	return CopyCursor(g_hKillCursor);
 }
 
+LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	switch (message)
+	{
+	case WM_SETCURSOR:
+		SetCursor(g_hActiveKillCursor);
+		return TRUE;
+	default:
+		return DefWindowProc(hWnd, message, wParam, lParam);
+	}
+}
+
 void EnterKillMode()
 {
 	if (g_bKillMode) {
@@ -214,10 +233,23 @@ void EnterKillMode()
 	}
 
 	g_bKillMode = true;
+	g_hActiveKillCursor = LoadKillCursor();
 
-	for (size_t i = 0; i < _countof(g_ocrCursors); i++) {
-		SetSystemCursor(LoadKillCursor(), g_ocrCursors[i]);
-	}
+	// A full-virtual-screen, topmost, layered overlay that owns the cursor, so the
+	// kill cursor shows over every window - even apps that set their own cursor.
+	int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+	int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+	int cx = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+	int cy = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+	g_hwndOverlay = CreateWindowEx(
+		WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+		g_wOverlayClassName, L"", WS_POPUP,
+		x, y, cx, cy, NULL, NULL, g_hInstance, NULL);
+
+	// Nearly transparent but not click-through, so it still owns the cursor.
+	SetLayeredWindowAttributes(g_hwndOverlay, 0, 1, LWA_ALPHA);
+	ShowWindow(g_hwndOverlay, SW_SHOWNOACTIVATE);
 
 	g_hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, MouseHookProc, g_hInstance, 0);
 	g_hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardHookProc, g_hInstance, 0);
@@ -238,16 +270,15 @@ void ExitKillMode()
 		g_hKeyboardHook = NULL;
 	}
 
-	// Reload the default system cursors, undoing the SetSystemCursor swaps.
-	SystemParametersInfo(SPI_SETCURSORS, 0, NULL, SPIF_SENDCHANGE);
-}
+	if (g_hwndOverlay) {
+		DestroyWindow(g_hwndOverlay);
+		g_hwndOverlay = NULL;
+	}
 
-LONG WINAPI CrashHandler(EXCEPTION_POINTERS *pExceptionInfo)
-{
-	(void)pExceptionInfo;
-	// Last-gasp cursor restore on an unhandled crash (does not run on TerminateProcess).
-	SystemParametersInfo(SPI_SETCURSORS, 0, NULL, SPIF_SENDCHANGE);
-	return EXCEPTION_EXECUTE_HANDLER;
+	if (g_hActiveKillCursor) {
+		DestroyCursor(g_hActiveKillCursor);
+		g_hActiveKillCursor = NULL;
+	}
 }
 
 void KillWindowUnderCursor(POINT pt)
