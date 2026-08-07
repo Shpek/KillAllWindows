@@ -31,7 +31,7 @@ HCURSOR g_hKillCursor = NULL;
 HCURSOR g_hActiveKillCursor = NULL;
 HHOOK g_hMouseHook = NULL;
 HHOOK g_hKeyboardHook = NULL;
-NOTIFYICONDATA g_nid = { 0 };
+NOTIFYICONDATA g_nidTrayIcon = { 0 };
 wchar_t g_wBuf[MAX_PATH];
 HWND g_hwndMain = NULL;
 HWND g_hwndOverlay = NULL;
@@ -114,7 +114,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		AddTrayIcon(hWnd);
 		break;
 	case WM_TRAYICON:
-		if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_LBUTTONUP) {
+		if (LOWORD(lParam) == WM_LBUTTONUP) {
+			EnterKillMode();
+		} else if (LOWORD(lParam) == WM_RBUTTONUP) {
 			ShowTrayMenu(hWnd);
 		}
 		break;
@@ -169,6 +171,7 @@ LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
 	if (nCode == HC_ACTION && !g_bConfirming) {
 		MSLLHOOKSTRUCT *pMouse = (MSLLHOOKSTRUCT *)lParam;
+		
 		switch (wParam) {
 		case WM_LBUTTONDOWN:
 			return 1;
@@ -205,6 +208,7 @@ HCURSOR LoadKillCursor()
 {
 	if (g_options.wCursorPath[0] != L'\0') {
 		HCURSOR hCursor = LoadCursorFromFile(g_options.wCursorPath);
+
 		if (hCursor) {
 			return hCursor;
 		}
@@ -257,14 +261,17 @@ void EnterKillMode()
 
 void ExitKillMode()
 {
-	if (!g_bKillMode)
+	if (!g_bKillMode) {
 		return;
+	}
+
 	g_bKillMode = false;
 
 	if (g_hMouseHook) {
 		UnhookWindowsHookEx(g_hMouseHook);
 		g_hMouseHook = NULL;
 	}
+
 	if (g_hKeyboardHook) {
 		UnhookWindowsHookEx(g_hKeyboardHook);
 		g_hKeyboardHook = NULL;
@@ -303,6 +310,7 @@ void KillWindowUnderCursor(POINT pt)
 
 		if (processHandle) {
 			bool explorer = false;
+
 			if (GetModuleFileNameEx(processHandle, 0, g_wBuf, MAX_PATH)) {
 				if (g_bDebugMode) {
 					std::wcout << dwProcessId << L": " << g_wBuf << std::endl;
@@ -334,16 +342,20 @@ void KillWindowUnderCursor(POINT pt)
 			}
 			
 			if (!g_bDebugMode && !explorer) {
-				bool confirmed = true;
+				bool bConfirmed = true;
+
 				if (g_options.bAskConfirmation) {
 					wchar_t msg[MAX_PATH + 64];
 					_snwprintf_s(msg, _countof(msg), _TRUNCATE, L"Kill this process?\n\n%s", g_wBuf);
 					g_bConfirming = true;
-					confirmed = MessageBox(NULL, msg, L"Kill All Windows",
+					
+					bConfirmed = MessageBox(NULL, msg, L"Kill All Windows",
 						MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND) == IDYES;
+					
 					g_bConfirming = false;
 				}
-				if (confirmed) {
+
+				if (bConfirmed) {
 					TerminateProcess(processHandle, 1);
 				}
 			}
@@ -354,20 +366,20 @@ void KillWindowUnderCursor(POINT pt)
 
 void AddTrayIcon(HWND hWnd)
 {
-	g_nid = { 0 };
-	g_nid.cbSize = sizeof(g_nid);
-	g_nid.hWnd = hWnd;
-	g_nid.uID = 1;
-	g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-	g_nid.uCallbackMessage = WM_TRAYICON;
-	g_nid.hIcon = LoadIcon(g_hInstance, MAKEINTRESOURCE(IDI_ICON1));
-	lstrcpy(g_nid.szTip, L"Kill All Windows");
-	Shell_NotifyIcon(NIM_ADD, &g_nid);
+	g_nidTrayIcon = { 0 };
+	g_nidTrayIcon.cbSize = sizeof(g_nidTrayIcon);
+	g_nidTrayIcon.hWnd = hWnd;
+	g_nidTrayIcon.uID = 1;
+	g_nidTrayIcon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+	g_nidTrayIcon.uCallbackMessage = WM_TRAYICON;
+	g_nidTrayIcon.hIcon = LoadIcon(g_hInstance, MAKEINTRESOURCE(IDI_ICON1));
+	lstrcpy(g_nidTrayIcon.szTip, L"Kill All Windows");
+	Shell_NotifyIcon(NIM_ADD, &g_nidTrayIcon);
 }
 
 void RemoveTrayIcon()
 {
-	Shell_NotifyIcon(NIM_DELETE, &g_nid);
+	Shell_NotifyIcon(NIM_DELETE, &g_nidTrayIcon);
 }
 
 void ShowTrayMenu(HWND hWnd)
