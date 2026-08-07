@@ -3,6 +3,10 @@
 
 #define WM_TRAYICON (WM_APP + 1)
 
+struct Options {
+	bool bAskConfirmation;
+};
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK CursorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
@@ -11,6 +15,8 @@ void KillWindowUnderCursor();
 void AddTrayIcon(HWND hWnd);
 void RemoveTrayIcon();
 void ShowTrayMenu(HWND hWnd);
+void LoadOptions();
+void SaveOptions();
 
 HINSTANCE g_hInstance = NULL;
 HCURSOR g_hKillCursor = NULL;
@@ -19,8 +25,9 @@ wchar_t g_wBuf[MAX_PATH];
 WNDCLASS g_wndClsCursor;
 HWND g_hwndCursor;
 bool g_bDebugMode = false;
-bool g_bAskConfirmation = false;
 bool g_bConfirming = false;
+Options g_options = { false };
+const wchar_t *g_wRegKey = L"Software\\FSC\\KillAllWindows";
 const wchar_t *g_wExplorerName = L"explorer.exe";
 const wchar_t *g_wProgramManagerName = L"Program Manager";
 
@@ -43,6 +50,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
 
 	g_hKillCursor = 0;
 	g_hwndCursor = NULL;
+
+	LoadOptions();
 
 	g_hInstance = GetModuleHandle(NULL);
 	MSG msg = { 0 };
@@ -231,7 +240,7 @@ void KillWindowUnderCursor()
 			}
 			if (!g_bDebugMode && !explorer) {
 				bool confirmed = true;
-				if (g_bAskConfirmation) {
+				if (g_options.bAskConfirmation) {
 					wchar_t msg[MAX_PATH + 64];
 					_snwprintf_s(msg, _countof(msg), _TRUNCATE, L"Kill this process?\n\n%s", g_wBuf);
 					g_bConfirming = true;
@@ -289,11 +298,12 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 	switch (message)
 	{
 	case WM_INITDIALOG:
-		CheckDlgButton(hDlg, IDC_ASK_CONFIRM, g_bAskConfirmation ? BST_CHECKED : BST_UNCHECKED);
+		CheckDlgButton(hDlg, IDC_ASK_CONFIRM, g_options.bAskConfirmation ? BST_CHECKED : BST_UNCHECKED);
 		return (INT_PTR)TRUE;
 	case WM_COMMAND:
 		if (LOWORD(wParam) == IDOK) {
-			g_bAskConfirmation = IsDlgButtonChecked(hDlg, IDC_ASK_CONFIRM) == BST_CHECKED;
+			g_options.bAskConfirmation = IsDlgButtonChecked(hDlg, IDC_ASK_CONFIRM) == BST_CHECKED;
+			SaveOptions();
 			EndDialog(hDlg, IDOK);
 			return (INT_PTR)TRUE;
 		}
@@ -326,4 +336,31 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 		return (INT_PTR)TRUE;
 	}
 	return (INT_PTR)FALSE;
+}
+
+void LoadOptions()
+{
+	g_options.bAskConfirmation = false;
+
+	HKEY hKey;
+	if (RegOpenKeyEx(HKEY_CURRENT_USER, g_wRegKey, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+		DWORD dwValue = 0;
+		DWORD dwSize = sizeof(dwValue);
+		DWORD dwType = 0;
+		if (RegQueryValueEx(hKey, L"AskConfirmation", NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS &&
+			dwType == REG_DWORD) {
+			g_options.bAskConfirmation = dwValue != 0;
+		}
+		RegCloseKey(hKey);
+	}
+}
+
+void SaveOptions()
+{
+	HKEY hKey;
+	if (RegCreateKeyEx(HKEY_CURRENT_USER, g_wRegKey, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
+		DWORD dwValue = g_options.bAskConfirmation ? 1 : 0;
+		RegSetValueEx(hKey, L"AskConfirmation", 0, REG_DWORD, (const BYTE*)&dwValue, sizeof(dwValue));
+		RegCloseKey(hKey);
+	}
 }
