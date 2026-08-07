@@ -27,6 +27,7 @@ void ShowTrayMenu(HWND hWnd);
 void EnterKillMode();
 void ExitKillMode();
 HCURSOR LoadKillCursor();
+void UpdateCursorPreview(HWND hDlg);
 void ApplyHotkey(HWND hWnd);
 void HotkeyToText(UINT mods, UINT vk, wchar_t *buf, int cch);
 LRESULT CALLBACK CaptureKeyHookProc(int nCode, WPARAM wParam, LPARAM lParam);
@@ -54,6 +55,7 @@ HWND g_hwndCaptureEdit = NULL;
 UINT g_uCaptureMods = 0;
 UINT g_uCaptureVk = 0;
 UINT g_uCaptureModMask = 0;
+HCURSOR g_hPreviewCursor = NULL;
 Options g_options = { false };
 const wchar_t *g_wRegKey = L"Software\\FSC\\KillAllWindows";
 const wchar_t *g_wRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -234,6 +236,29 @@ HCURSOR LoadKillCursor()
 
 	// No custom cursor (or it failed to load); fall back to the embedded one.
 	return CopyCursor(g_hKillCursor);
+}
+
+// Show the cursor currently named in the path field (or the embedded one) in the
+// preview box. HCURSOR and HICON are interchangeable, so the SS_ICON static draws it.
+void UpdateCursorPreview(HWND hDlg)
+{
+	wchar_t path[MAX_PATH];
+	GetDlgItemText(hDlg, IDC_CURSOR_PATH, path, _countof(path));
+
+	HCURSOR hCursor = NULL;
+	if (path[0] != L'\0') {
+		hCursor = LoadCursorFromFile(path);
+	}
+	if (!hCursor) {
+		hCursor = CopyCursor(g_hKillCursor);
+	}
+
+	SendDlgItemMessage(hDlg, IDC_CURSOR_PREVIEW, STM_SETIMAGE, IMAGE_ICON, (LPARAM)hCursor);
+
+	if (g_hPreviewCursor) {
+		DestroyCursor(g_hPreviewCursor);
+	}
+	g_hPreviewCursor = hCursor;
 }
 
 void HotkeyToText(UINT mods, UINT vk, wchar_t *buf, int cch)
@@ -519,6 +544,7 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 		CheckDlgButton(hDlg, IDC_ASK_CONFIRM, g_options.bAskConfirmation ? BST_CHECKED : BST_UNCHECKED);
 		CheckDlgButton(hDlg, IDC_START_WITH_WINDOWS, IsAutoStartEnabled() ? BST_CHECKED : BST_UNCHECKED);
 		SetDlgItemText(hDlg, IDC_CURSOR_PATH, g_options.wCursorPath);
+		UpdateCursorPreview(hDlg);
 
 		CheckDlgButton(hDlg, IDC_HOTKEY_ENABLE, g_options.bHotkeyEnabled ? BST_CHECKED : BST_UNCHECKED);
 		g_uCaptureMods = g_options.uHotkeyMods;
@@ -597,11 +623,13 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 
 			if (GetOpenFileName(&ofn)) {
 				SetDlgItemText(hDlg, IDC_CURSOR_PATH, file);
+				UpdateCursorPreview(hDlg);
 			}
 			return (INT_PTR)TRUE;
 		}
 		if (LOWORD(wParam) == IDC_CURSOR_DEFAULT) {
 			SetDlgItemText(hDlg, IDC_CURSOR_PATH, L"");
+			UpdateCursorPreview(hDlg);
 			return (INT_PTR)TRUE;
 		}
 		if (LOWORD(wParam) == IDOK) {
@@ -624,6 +652,10 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 		if (g_hCaptureHook) {
 			UnhookWindowsHookEx(g_hCaptureHook);
 			g_hCaptureHook = NULL;
+		}
+		if (g_hPreviewCursor) {
+			DestroyCursor(g_hPreviewCursor);
+			g_hPreviewCursor = NULL;
 		}
 		break;
 	case WM_CLOSE:
