@@ -1,13 +1,17 @@
 #include "pch.h"
 #include "resource.h"
 
-#define WM_TRAYICON          (WM_APP + 1)
-#define WM_APP_KILL          (WM_APP + 2)
-#define WM_APP_EXIT_KILLMODE (WM_APP + 3)
+#define WM_TRAYICON            (WM_APP + 1)
+#define WM_APP_KILL            (WM_APP + 2)
+#define WM_APP_EXIT_KILLMODE   (WM_APP + 3)
+#define WM_APP_HOTKEY_CAPTURED (WM_APP + 4)
 
 struct Options {
 	bool bAskConfirmation;
 	wchar_t wCursorPath[MAX_PATH];
+	bool bHotkeyEnabled;
+	UINT uHotkeyMods;
+	UINT uHotkeyVk;
 };
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -23,6 +27,9 @@ void ShowTrayMenu(HWND hWnd);
 void EnterKillMode();
 void ExitKillMode();
 HCURSOR LoadKillCursor();
+void ApplyHotkey(HWND hWnd);
+void HotkeyToText(UINT mods, UINT vk, wchar_t *buf, int cch);
+LRESULT CALLBACK CaptureKeyHookProc(int nCode, WPARAM wParam, LPARAM lParam);
 void LoadOptions();
 void SaveOptions();
 
@@ -31,6 +38,7 @@ HCURSOR g_hKillCursor = NULL;
 HCURSOR g_hActiveKillCursor = NULL;
 HHOOK g_hMouseHook = NULL;
 HHOOK g_hKeyboardHook = NULL;
+HHOOK g_hCaptureHook = NULL;
 NOTIFYICONDATA g_nidTrayIcon = { 0 };
 wchar_t g_wBuf[MAX_PATH];
 HWND g_hwndMain = NULL;
@@ -40,6 +48,10 @@ bool g_bConfirming = false;
 bool g_bKillMode = false;
 bool g_bMultiKill = false;
 POINT g_ptKill = { 0 };
+HWND g_hwndCaptureEdit = NULL;
+UINT g_uCaptureMods = 0;
+UINT g_uCaptureVk = 0;
+UINT g_uCaptureModMask = 0;
 Options g_options = { false };
 const wchar_t *g_wRegKey = L"Software\\FSC\\KillAllWindows";
 const wchar_t *g_wExplorerName = L"explorer.exe";
@@ -110,7 +122,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	switch (message)
 	{
 	case WM_CREATE:
-		RegisterHotKey(hWnd, 100, MOD_WIN | MOD_SHIFT, 'K');
+		ApplyHotkey(hWnd);
 		AddTrayIcon(hWnd);
 		break;
 	case WM_TRAYICON:
@@ -123,7 +135,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	case WM_COMMAND:
 		switch (LOWORD(wParam)) {
 		case IDM_OPTIONS:
-			DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_OPTIONS), hWnd, OptionsDlgProc);
+			if (DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_OPTIONS), hWnd, OptionsDlgProc) == IDOK) {
+				ApplyHotkey(hWnd);
+			}
 			break;
 		case IDM_ABOUT:
 			DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_ABOUT), hWnd, AboutDlgProc);
@@ -216,6 +230,94 @@ HCURSOR LoadKillCursor()
 
 	// No custom cursor (or it failed to load); fall back to the embedded one.
 	return CopyCursor(g_hKillCursor);
+}
+
+void HotkeyToText(UINT mods, UINT vk, wchar_t *buf, int cch)
+{
+	if (vk == 0) {
+		_snwprintf_s(buf, cch, _TRUNCATE, L"None");
+		return;
+	}
+
+	wchar_t keyName[64] = L"";
+	UINT scan = MapVirtualKey(vk, MAPVK_VK_TO_VSC);
+	LONG lp = (LONG)(scan << 16);
+
+	switch (vk) {
+	case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
+	case VK_PRIOR: case VK_NEXT: case VK_END: case VK_HOME:
+	case VK_INSERT: case VK_DELETE: case VK_DIVIDE: case VK_NUMLOCK:
+		lp |= (1 << 24);
+		break;
+	}
+
+	if (GetKeyNameText(lp, keyName, _countof(keyName)) == 0) {
+		_snwprintf_s(keyName, _countof(keyName), _TRUNCATE, L"0x%02X", vk);
+	}
+
+	_snwprintf_s(buf, cch, _TRUNCATE, L"%s%s%s%s%s",
+		(mods & MOD_CONTROL) ? L"Ctrl + " : L"",
+		(mods & MOD_ALT) ? L"Alt + " : L"",
+		(mods & MOD_SHIFT) ? L"Shift + " : L"",
+		(mods & MOD_WIN) ? L"Win + " : L"",
+		keyName);
+}
+
+void ApplyHotkey(HWND hWnd)
+{
+	UnregisterHotKey(hWnd, 100);
+
+	if (g_options.bHotkeyEnabled && g_options.uHotkeyVk != 0) {
+		if (!RegisterHotKey(hWnd, 100, g_options.uHotkeyMods | MOD_NOREPEAT, g_options.uHotkeyVk)) {
+			MessageBox(hWnd,
+				L"The selected shortcut is already in use by another application "
+				L"and could not be registered.",
+				L"Kill All Windows", MB_OK | MB_ICONWARNING);
+		}
+	}
+}
+
+// Low-level keyboard hook active only while the shortcut field has focus. It
+// records the pressed chord (tracking the modifier mask itself so Win-key combos
+// work) and swallows every key so nothing else - Start menu, Win+X, etc. - fires.
+LRESULT CALLBACK CaptureKeyHookProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+	if (nCode == HC_ACTION) {
+		KBDLLHOOKSTRUCT *pKey = (KBDLLHOOKSTRUCT *)lParam;
+		UINT vk = pKey->vkCode;
+		bool down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+
+		UINT bit = 0;
+		switch (vk) {
+		case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
+			bit = MOD_CONTROL;
+			break;
+		case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
+			bit = MOD_SHIFT;
+			break;
+		case VK_MENU: case VK_LMENU: case VK_RMENU:
+			bit = MOD_ALT;
+			break;
+		case VK_LWIN: case VK_RWIN:
+			bit = MOD_WIN;
+			break;
+		}
+
+		if (bit) {
+			if (down) {
+				g_uCaptureModMask |= bit;
+			} else {
+				g_uCaptureModMask &= ~bit;
+			}
+		} else if (down) {
+			// Let the dialog validate + display it (a hook must not block on a dialog).
+			PostMessage(GetParent(g_hwndCaptureEdit), WM_APP_HOTKEY_CAPTURED, g_uCaptureModMask, vk);
+		}
+
+		return 1;
+	}
+
+	return CallNextHookEx(NULL, nCode, wParam, lParam);
 }
 
 LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -405,10 +507,73 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 	switch (message)
 	{
 	case WM_INITDIALOG:
+	{
 		CheckDlgButton(hDlg, IDC_ASK_CONFIRM, g_options.bAskConfirmation ? BST_CHECKED : BST_UNCHECKED);
 		SetDlgItemText(hDlg, IDC_CURSOR_PATH, g_options.wCursorPath);
+
+		CheckDlgButton(hDlg, IDC_HOTKEY_ENABLE, g_options.bHotkeyEnabled ? BST_CHECKED : BST_UNCHECKED);
+		g_uCaptureMods = g_options.uHotkeyMods;
+		g_uCaptureVk = g_options.uHotkeyVk;
+
+		wchar_t buf[128];
+		HotkeyToText(g_uCaptureMods, g_uCaptureVk, buf, _countof(buf));
+		SetDlgItemText(hDlg, IDC_HOTKEY_KEY, buf);
+		EnableWindow(GetDlgItem(hDlg, IDC_HOTKEY_KEY), g_options.bHotkeyEnabled);
 		return (INT_PTR)TRUE;
+	}
+	case WM_APP_HOTKEY_CAPTURED:
+	{
+		UINT mods = (UINT)wParam;
+		UINT vk = (UINT)lParam;
+
+		// Available if it's the shortcut we already own, or if a trial registration succeeds.
+		bool available = g_options.bHotkeyEnabled &&
+			mods == g_options.uHotkeyMods && vk == g_options.uHotkeyVk;
+
+		if (!available && RegisterHotKey(hDlg, 0x100, mods | MOD_NOREPEAT, vk)) {
+			UnregisterHotKey(hDlg, 0x100);
+			available = true;
+		}
+
+		if (available) {
+			g_uCaptureMods = mods;
+			g_uCaptureVk = vk;
+		} else {
+			// Reject the change and fall back to the default shortcut.
+			g_uCaptureMods = MOD_WIN | MOD_SHIFT;
+			g_uCaptureVk = 'K';
+			MessageBox(hDlg,
+				L"That shortcut is already in use by another application. "
+				L"Reverting to the default (Win + Shift + K).",
+				L"Kill All Windows", MB_OK | MB_ICONWARNING);
+		}
+
+		wchar_t buf[128];
+		HotkeyToText(g_uCaptureMods, g_uCaptureVk, buf, _countof(buf));
+		SetDlgItemText(hDlg, IDC_HOTKEY_KEY, buf);
+		return (INT_PTR)TRUE;
+	}
 	case WM_COMMAND:
+		if (LOWORD(wParam) == IDC_HOTKEY_ENABLE) {
+			BOOL enabled = IsDlgButtonChecked(hDlg, IDC_HOTKEY_ENABLE) == BST_CHECKED;
+			EnableWindow(GetDlgItem(hDlg, IDC_HOTKEY_KEY), enabled);
+			return (INT_PTR)TRUE;
+		}
+		if (LOWORD(wParam) == IDC_HOTKEY_KEY && HIWORD(wParam) == EN_SETFOCUS) {
+			g_hwndCaptureEdit = GetDlgItem(hDlg, IDC_HOTKEY_KEY);
+			g_uCaptureModMask = 0;
+			if (!g_hCaptureHook) {
+				g_hCaptureHook = SetWindowsHookEx(WH_KEYBOARD_LL, CaptureKeyHookProc, g_hInstance, 0);
+			}
+			return (INT_PTR)TRUE;
+		}
+		if (LOWORD(wParam) == IDC_HOTKEY_KEY && HIWORD(wParam) == EN_KILLFOCUS) {
+			if (g_hCaptureHook) {
+				UnhookWindowsHookEx(g_hCaptureHook);
+				g_hCaptureHook = NULL;
+			}
+			return (INT_PTR)TRUE;
+		}
 		if (LOWORD(wParam) == IDC_CURSOR_BROWSE) {
 			wchar_t file[MAX_PATH] = L"";
 			GetDlgItemText(hDlg, IDC_CURSOR_PATH, file, _countof(file));
@@ -433,6 +598,9 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 		if (LOWORD(wParam) == IDOK) {
 			g_options.bAskConfirmation = IsDlgButtonChecked(hDlg, IDC_ASK_CONFIRM) == BST_CHECKED;
 			GetDlgItemText(hDlg, IDC_CURSOR_PATH, g_options.wCursorPath, _countof(g_options.wCursorPath));
+			g_options.bHotkeyEnabled = IsDlgButtonChecked(hDlg, IDC_HOTKEY_ENABLE) == BST_CHECKED;
+			g_options.uHotkeyMods = g_uCaptureMods;
+			g_options.uHotkeyVk = g_uCaptureVk;
 			SaveOptions();
 			EndDialog(hDlg, IDOK);
 			return (INT_PTR)TRUE;
@@ -440,6 +608,12 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 		if (LOWORD(wParam) == IDCANCEL) {
 			EndDialog(hDlg, IDCANCEL);
 			return (INT_PTR)TRUE;
+		}
+		break;
+	case WM_DESTROY:
+		if (g_hCaptureHook) {
+			UnhookWindowsHookEx(g_hCaptureHook);
+			g_hCaptureHook = NULL;
 		}
 		break;
 	case WM_CLOSE:
@@ -472,6 +646,9 @@ void LoadOptions()
 {
 	g_options.bAskConfirmation = false;
 	g_options.wCursorPath[0] = L'\0';
+	g_options.bHotkeyEnabled = true;
+	g_options.uHotkeyMods = MOD_WIN | MOD_SHIFT;
+	g_options.uHotkeyVk = 'K';
 
 	HKEY hKey;
 	if (RegOpenKeyEx(HKEY_CURRENT_USER, g_wRegKey, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
@@ -492,6 +669,24 @@ void LoadOptions()
 			g_options.wCursorPath[0] = L'\0';
 		}
 
+		dwSize = sizeof(dwValue);
+		if (RegQueryValueEx(hKey, L"HotkeyEnabled", NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS &&
+			dwType == REG_DWORD) {
+			g_options.bHotkeyEnabled = dwValue != 0;
+		}
+
+		dwSize = sizeof(dwValue);
+		if (RegQueryValueEx(hKey, L"HotkeyMods", NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS &&
+			dwType == REG_DWORD) {
+			g_options.uHotkeyMods = dwValue;
+		}
+
+		dwSize = sizeof(dwValue);
+		if (RegQueryValueEx(hKey, L"HotkeyVk", NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS &&
+			dwType == REG_DWORD) {
+			g_options.uHotkeyVk = dwValue;
+		}
+
 		RegCloseKey(hKey);
 	}
 }
@@ -504,6 +699,14 @@ void SaveOptions()
 		RegSetValueEx(hKey, L"AskConfirmation", 0, REG_DWORD, (const BYTE*)&dwValue, sizeof(dwValue));
 		RegSetValueEx(hKey, L"CursorPath", 0, REG_SZ, (const BYTE*)g_options.wCursorPath,
 			(lstrlen(g_options.wCursorPath) + 1) * sizeof(wchar_t));
+
+		dwValue = g_options.bHotkeyEnabled ? 1 : 0;
+		RegSetValueEx(hKey, L"HotkeyEnabled", 0, REG_DWORD, (const BYTE*)&dwValue, sizeof(dwValue));
+		dwValue = g_options.uHotkeyMods;
+		RegSetValueEx(hKey, L"HotkeyMods", 0, REG_DWORD, (const BYTE*)&dwValue, sizeof(dwValue));
+		dwValue = g_options.uHotkeyVk;
+		RegSetValueEx(hKey, L"HotkeyVk", 0, REG_DWORD, (const BYTE*)&dwValue, sizeof(dwValue));
+
 		RegCloseKey(hKey);
 	}
 }
