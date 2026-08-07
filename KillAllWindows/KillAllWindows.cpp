@@ -7,6 +7,7 @@
 
 struct Options {
 	bool bAskConfirmation;
+	wchar_t wCursorPath[MAX_PATH];
 };
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -20,6 +21,8 @@ void RemoveTrayIcon();
 void ShowTrayMenu(HWND hWnd);
 void EnterKillMode();
 void ExitKillMode();
+HCURSOR LoadKillCursor();
+LONG WINAPI CrashHandler(EXCEPTION_POINTERS *pExceptionInfo);
 void LoadOptions();
 void SaveOptions();
 
@@ -63,6 +66,11 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
 	}
 
 	LoadOptions();
+
+	// Restore cursors if a crash restores them; and heal a stuck cursor left by
+	// a previous run that was hard-killed (e.g. from Task Manager) in kill mode.
+	SetUnhandledExceptionFilter(CrashHandler);
+	SystemParametersInfo(SPI_SETCURSORS, 0, NULL, SPIF_SENDCHANGE);
 
 	g_hInstance = GetModuleHandle(NULL);
 	g_hKillCursor = LoadCursor(g_hInstance, MAKEINTRESOURCE(IDC_CURSOR1));
@@ -186,6 +194,19 @@ LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 	return CallNextHookEx(NULL, nCode, wParam, lParam);
 }
 
+HCURSOR LoadKillCursor()
+{
+	if (g_options.wCursorPath[0] != L'\0') {
+		HCURSOR hCursor = LoadCursorFromFile(g_options.wCursorPath);
+		if (hCursor) {
+			return hCursor;
+		}
+	}
+
+	// No custom cursor (or it failed to load); fall back to the embedded one.
+	return CopyCursor(g_hKillCursor);
+}
+
 void EnterKillMode()
 {
 	if (g_bKillMode) {
@@ -195,7 +216,7 @@ void EnterKillMode()
 	g_bKillMode = true;
 
 	for (size_t i = 0; i < _countof(g_ocrCursors); i++) {
-		SetSystemCursor(CopyCursor(g_hKillCursor), g_ocrCursors[i]);
+		SetSystemCursor(LoadKillCursor(), g_ocrCursors[i]);
 	}
 
 	g_hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, MouseHookProc, g_hInstance, 0);
@@ -221,6 +242,14 @@ void ExitKillMode()
 	SystemParametersInfo(SPI_SETCURSORS, 0, NULL, SPIF_SENDCHANGE);
 }
 
+LONG WINAPI CrashHandler(EXCEPTION_POINTERS *pExceptionInfo)
+{
+	(void)pExceptionInfo;
+	// Last-gasp cursor restore on an unhandled crash (does not run on TerminateProcess).
+	SystemParametersInfo(SPI_SETCURSORS, 0, NULL, SPIF_SENDCHANGE);
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+
 void KillWindowUnderCursor(POINT pt)
 {
 	HWND wnd = WindowFromPoint(pt);
@@ -233,6 +262,12 @@ void KillWindowUnderCursor(POINT pt)
 	if (wnd != NULL) {
 		DWORD dwProcessId = 0;
 		GetWindowThreadProcessId(wnd, &dwProcessId);
+
+		// Never kill ourselves (e.g. clicking our own Options/About dialog).
+		if (dwProcessId == GetCurrentProcessId()) {
+			return;
+		}
+
 		HANDLE processHandle = OpenProcess(PROCESS_ALL_ACCESS, false, dwProcessId);
 
 		if (processHandle) {
@@ -328,10 +363,33 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 	{
 	case WM_INITDIALOG:
 		CheckDlgButton(hDlg, IDC_ASK_CONFIRM, g_options.bAskConfirmation ? BST_CHECKED : BST_UNCHECKED);
+		SetDlgItemText(hDlg, IDC_CURSOR_PATH, g_options.wCursorPath);
 		return (INT_PTR)TRUE;
 	case WM_COMMAND:
+		if (LOWORD(wParam) == IDC_CURSOR_BROWSE) {
+			wchar_t file[MAX_PATH] = L"";
+			GetDlgItemText(hDlg, IDC_CURSOR_PATH, file, _countof(file));
+
+			OPENFILENAME ofn = { 0 };
+			ofn.lStructSize = sizeof(ofn);
+			ofn.hwndOwner = hDlg;
+			ofn.lpstrFilter = L"Cursor files (*.ani;*.cur)\0*.ani;*.cur\0All files (*.*)\0*.*\0";
+			ofn.lpstrFile = file;
+			ofn.nMaxFile = _countof(file);
+			ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+
+			if (GetOpenFileName(&ofn)) {
+				SetDlgItemText(hDlg, IDC_CURSOR_PATH, file);
+			}
+			return (INT_PTR)TRUE;
+		}
+		if (LOWORD(wParam) == IDC_CURSOR_DEFAULT) {
+			SetDlgItemText(hDlg, IDC_CURSOR_PATH, L"");
+			return (INT_PTR)TRUE;
+		}
 		if (LOWORD(wParam) == IDOK) {
 			g_options.bAskConfirmation = IsDlgButtonChecked(hDlg, IDC_ASK_CONFIRM) == BST_CHECKED;
+			GetDlgItemText(hDlg, IDC_CURSOR_PATH, g_options.wCursorPath, _countof(g_options.wCursorPath));
 			SaveOptions();
 			EndDialog(hDlg, IDOK);
 			return (INT_PTR)TRUE;
@@ -370,6 +428,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 void LoadOptions()
 {
 	g_options.bAskConfirmation = false;
+	g_options.wCursorPath[0] = L'\0';
 
 	HKEY hKey;
 	if (RegOpenKeyEx(HKEY_CURRENT_USER, g_wRegKey, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
@@ -380,6 +439,16 @@ void LoadOptions()
 			dwType == REG_DWORD) {
 			g_options.bAskConfirmation = dwValue != 0;
 		}
+
+		DWORD dwPathSize = sizeof(g_options.wCursorPath);
+		if (RegQueryValueEx(hKey, L"CursorPath", NULL, &dwType, (LPBYTE)g_options.wCursorPath, &dwPathSize) == ERROR_SUCCESS &&
+			dwType == REG_SZ) {
+			// RegQueryValueEx does not guarantee termination; enforce it.
+			g_options.wCursorPath[_countof(g_options.wCursorPath) - 1] = L'\0';
+		} else {
+			g_options.wCursorPath[0] = L'\0';
+		}
+
 		RegCloseKey(hKey);
 	}
 }
@@ -390,6 +459,8 @@ void SaveOptions()
 	if (RegCreateKeyEx(HKEY_CURRENT_USER, g_wRegKey, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
 		DWORD dwValue = g_options.bAskConfirmation ? 1 : 0;
 		RegSetValueEx(hKey, L"AskConfirmation", 0, REG_DWORD, (const BYTE*)&dwValue, sizeof(dwValue));
+		RegSetValueEx(hKey, L"CursorPath", 0, REG_SZ, (const BYTE*)g_options.wCursorPath,
+			(lstrlen(g_options.wCursorPath) + 1) * sizeof(wchar_t));
 		RegCloseKey(hKey);
 	}
 }

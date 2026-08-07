@@ -42,8 +42,10 @@ under the cursor. Tray menu: Options / About / Exit.
 
 ## Working style
 
+- Do not assume user intent. Always ask if unsure.
 - Confirm each file change; don't batch edits without review. (Permission
   `defaultMode` is set to `default` in `.claude/settings.json` for this repo.)
+
 
 ## Project specifics
 
