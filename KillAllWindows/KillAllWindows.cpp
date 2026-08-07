@@ -19,6 +19,8 @@ wchar_t g_wBuf[MAX_PATH];
 WNDCLASS g_wndClsCursor;
 HWND g_hwndCursor;
 bool g_bDebugMode = false;
+bool g_bAskConfirmation = false;
+bool g_bConfirming = false;
 const wchar_t *g_wExplorerName = L"explorer.exe";
 const wchar_t *g_wProgramManagerName = L"Program Manager";
 
@@ -137,9 +139,11 @@ LRESULT CALLBACK CursorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 		SetTimer(hWnd, 1, 10, NULL);
 		break;
 	case WM_TIMER:
-		POINT pt;
-		GetCursorPos(&pt);
-		SetWindowPos(hWnd, HWND_TOP, pt.x - 150, pt.y - 150, 300, 300, 0);
+		if (!g_bConfirming) {
+			POINT pt;
+			GetCursorPos(&pt);
+			SetWindowPos(hWnd, HWND_TOP, pt.x - 150, pt.y - 150, 300, 300, SWP_NOACTIVATE);
+		}
 		break;
 	case WM_SETCURSOR:
 		SetCursor(g_hKillCursor);
@@ -170,7 +174,8 @@ LRESULT CALLBACK CursorWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 		KillTimer(hWnd, 1);
 		break;
 	case WM_KILLFOCUS:
-		SetFocus(hWnd);
+		if (!g_bConfirming)
+			SetFocus(hWnd);
 		break;
 	default:
 		return DefWindowProc(hWnd, message, wParam, lParam);
@@ -225,7 +230,18 @@ void KillWindowUnderCursor()
 				}
 			}
 			if (!g_bDebugMode && !explorer) {
-				TerminateProcess(processHandle, 1);
+				bool confirmed = true;
+				if (g_bAskConfirmation) {
+					wchar_t msg[MAX_PATH + 64];
+					_snwprintf_s(msg, _countof(msg), _TRUNCATE, L"Kill this process?\n\n%s", g_wBuf);
+					g_bConfirming = true;
+					confirmed = MessageBox(NULL, msg, L"Kill All Windows",
+						MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND) == IDYES;
+					g_bConfirming = false;
+				}
+				if (confirmed) {
+					TerminateProcess(processHandle, 1);
+				}
 			}
 			CloseHandle(processHandle);
 		}
@@ -273,10 +289,16 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 	switch (message)
 	{
 	case WM_INITDIALOG:
+		CheckDlgButton(hDlg, IDC_ASK_CONFIRM, g_bAskConfirmation ? BST_CHECKED : BST_UNCHECKED);
 		return (INT_PTR)TRUE;
 	case WM_COMMAND:
-		if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
-			EndDialog(hDlg, LOWORD(wParam));
+		if (LOWORD(wParam) == IDOK) {
+			g_bAskConfirmation = IsDlgButtonChecked(hDlg, IDC_ASK_CONFIRM) == BST_CHECKED;
+			EndDialog(hDlg, IDOK);
+			return (INT_PTR)TRUE;
+		}
+		if (LOWORD(wParam) == IDCANCEL) {
+			EndDialog(hDlg, IDCANCEL);
 			return (INT_PTR)TRUE;
 		}
 		break;
