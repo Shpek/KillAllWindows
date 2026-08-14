@@ -27,6 +27,7 @@ LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 void KillWindowUnderCursor(POINT pt, KillBehavior behavior);
+bool ConfirmAction(const wchar_t *prompt, const wchar_t *target);
 void UpdateAltBehaviorLabel(HWND hDlg);
 void AddTrayIcon(HWND hWnd);
 void RemoveTrayIcon();
@@ -444,6 +445,25 @@ void ExitKillMode()
 	}
 }
 
+// Returns true to proceed. Respects the "Ask for confirmation" option; when off,
+// always proceeds. g_bConfirming lets the input hooks pass through to the dialog.
+bool ConfirmAction(const wchar_t *prompt, const wchar_t *target)
+{
+	if (!g_options.bAskConfirmation) {
+		return true;
+	}
+
+	wchar_t msg[MAX_PATH + 64];
+	_snwprintf_s(msg, _countof(msg), _TRUNCATE, L"%s\n\n%s", prompt, target);
+
+	g_bConfirming = true;
+	bool bConfirmed = MessageBox(NULL, msg, L"Kill All Windows",
+		MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND) == IDYES;
+	g_bConfirming = false;
+
+	return bConfirmed;
+}
+
 void KillWindowUnderCursor(POINT pt, KillBehavior behavior)
 {
 	HWND wnd = WindowFromPoint(pt);
@@ -468,7 +488,8 @@ void KillWindowUnderCursor(POINT pt, KillBehavior behavior)
 			HWND desktop = GetDesktopWindow();
 			GetWindowText(root, g_wBuf, sizeof(g_wBuf) / sizeof(g_wBuf[0]));
 
-			if (root != desktop && lstrcmp(g_wBuf, g_wProgramManagerName) != 0) {
+			if (root != desktop && lstrcmp(g_wBuf, g_wProgramManagerName) != 0 &&
+				ConfirmAction(L"Close this window?", g_wBuf)) {
 				SendMessage(root, WM_CLOSE, 0, 0);
 			}
 			return;
@@ -501,7 +522,8 @@ void KillWindowUnderCursor(POINT pt, KillBehavior behavior)
 						if (!g_bDebugMode &&
 							root != desktop &&
 							lstrlen(g_wBuf) > 0 &&
-							lstrcmp(g_wBuf, g_wProgramManagerName) != 0)
+							lstrcmp(g_wBuf, g_wProgramManagerName) != 0 &&
+							ConfirmAction(L"Close this window?", g_wBuf))
 						{
 							SendMessage(root, WM_CLOSE, 0, 0);
 						}
@@ -510,20 +532,7 @@ void KillWindowUnderCursor(POINT pt, KillBehavior behavior)
 			}
 			
 			if (!g_bDebugMode && !explorer) {
-				bool bConfirmed = true;
-
-				if (g_options.bAskConfirmation) {
-					wchar_t msg[MAX_PATH + 64];
-					_snwprintf_s(msg, _countof(msg), _TRUNCATE, L"Kill this process?\n\n%s", g_wBuf);
-					g_bConfirming = true;
-					
-					bConfirmed = MessageBox(NULL, msg, L"Kill All Windows",
-						MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND) == IDYES;
-					
-					g_bConfirming = false;
-				}
-
-				if (bConfirmed) {
+				if (ConfirmAction(L"Kill this process?", g_wBuf)) {
 					TerminateProcess(processHandle, 1);
 				}
 			}
