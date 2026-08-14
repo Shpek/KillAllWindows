@@ -6,8 +6,14 @@
 #define WM_APP_EXIT_KILLMODE   (WM_APP + 3)
 #define WM_APP_HOTKEY_CAPTURED (WM_APP + 4)
 
+enum KillBehavior {
+	KILL_CLOSE_WINDOW,
+	KILL_END_PROCESS
+};
+
 struct Options {
 	bool bAskConfirmation;
+	KillBehavior eDefaultBehavior;
 	wchar_t wCursorPath[MAX_PATH];
 	bool bHotkeyEnabled;
 	UINT uHotkeyMods;
@@ -20,7 +26,8 @@ LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK KeyboardHookProc(int nCode, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
-void KillWindowUnderCursor(POINT pt);
+void KillWindowUnderCursor(POINT pt, KillBehavior behavior);
+void UpdateAltBehaviorLabel(HWND hDlg);
 void AddTrayIcon(HWND hWnd);
 void RemoveTrayIcon();
 void ShowTrayMenu(HWND hWnd);
@@ -50,6 +57,7 @@ bool g_bDebugMode = false;
 bool g_bConfirming = false;
 bool g_bKillMode = false;
 bool g_bMultiKill = false;
+bool g_bAltKillBehavior = false;
 POINT g_ptKill = { 0 };
 HWND g_hwndCaptureEdit = NULL;
 UINT g_uCaptureMods = 0;
@@ -168,9 +176,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		EnterKillMode();
 		break;
 	case WM_APP_KILL:
+	{
 		// Hide the overlay so WindowFromPoint finds the real target beneath it.
 		ShowWindow(g_hwndOverlay, SW_HIDE);
-		KillWindowUnderCursor(g_ptKill);
+
+		// Holding Alt inverts the configured default behavior.
+		KillBehavior behavior = g_options.eDefaultBehavior;
+		if (g_bAltKillBehavior) {
+			behavior = (behavior == KILL_CLOSE_WINDOW) ? KILL_END_PROCESS : KILL_CLOSE_WINDOW;
+		}
+		KillWindowUnderCursor(g_ptKill, behavior);
 
 		if (g_bMultiKill) {
 			ShowWindow(g_hwndOverlay, SW_SHOWNOACTIVATE);
@@ -178,6 +193,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			ExitKillMode();
 		}
 		break;
+	}
 	case WM_APP_EXIT_KILLMODE:
 		ExitKillMode();
 		break;
@@ -198,6 +214,7 @@ LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 		case WM_LBUTTONUP:
 			g_ptKill = pMouse->pt;
 			g_bMultiKill = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+			g_bAltKillBehavior = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
 			PostMessage(g_hwndMain, WM_APP_KILL, 0, 0);
 			return 1;
 		case WM_RBUTTONDOWN:
@@ -259,6 +276,14 @@ void UpdateCursorPreview(HWND hDlg)
 		DestroyCursor(g_hPreviewCursor);
 	}
 	g_hPreviewCursor = hCursor;
+}
+
+// The label shows what holding Alt will do - i.e. the opposite of the default.
+void UpdateAltBehaviorLabel(HWND hDlg)
+{
+	bool defaultClose = IsDlgButtonChecked(hDlg, IDC_DEFAULT_CLOSE) == BST_CHECKED;
+	SetDlgItemText(hDlg, IDC_ALT_BEHAVIOR_LABEL,
+		defaultClose ? L"[Alt] key - End Process" : L"[Alt] key - Close Window");
 }
 
 void HotkeyToText(UINT mods, UINT vk, wchar_t *buf, int cch)
@@ -419,7 +444,7 @@ void ExitKillMode()
 	}
 }
 
-void KillWindowUnderCursor(POINT pt)
+void KillWindowUnderCursor(POINT pt, KillBehavior behavior)
 {
 	HWND wnd = WindowFromPoint(pt);
 
@@ -432,8 +457,20 @@ void KillWindowUnderCursor(POINT pt)
 		DWORD dwProcessId = 0;
 		GetWindowThreadProcessId(wnd, &dwProcessId);
 
-		// Never kill ourselves (e.g. clicking our own Options/About dialog).
+		// Never act on ourselves (e.g. clicking our own Options/About dialog).
 		if (dwProcessId == GetCurrentProcessId()) {
+			return;
+		}
+
+		if (behavior == KILL_CLOSE_WINDOW) {
+			// Graceful close: ask the top-level window to close, leaving the shell alone.
+			HWND root = GetAncestor(wnd, GA_ROOT);
+			HWND desktop = GetDesktopWindow();
+			GetWindowText(root, g_wBuf, sizeof(g_wBuf) / sizeof(g_wBuf[0]));
+
+			if (root != desktop && lstrcmp(g_wBuf, g_wProgramManagerName) != 0) {
+				SendMessage(root, WM_CLOSE, 0, 0);
+			}
 			return;
 		}
 
@@ -543,6 +580,11 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 
 		CheckDlgButton(hDlg, IDC_ASK_CONFIRM, g_options.bAskConfirmation ? BST_CHECKED : BST_UNCHECKED);
 		CheckDlgButton(hDlg, IDC_START_WITH_WINDOWS, IsAutoStartEnabled() ? BST_CHECKED : BST_UNCHECKED);
+
+		CheckRadioButton(hDlg, IDC_DEFAULT_CLOSE, IDC_DEFAULT_END,
+			g_options.eDefaultBehavior == KILL_CLOSE_WINDOW ? IDC_DEFAULT_CLOSE : IDC_DEFAULT_END);
+		UpdateAltBehaviorLabel(hDlg);
+
 		SetDlgItemText(hDlg, IDC_CURSOR_PATH, g_options.wCursorPath);
 		UpdateCursorPreview(hDlg);
 
@@ -589,6 +631,10 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 		return (INT_PTR)TRUE;
 	}
 	case WM_COMMAND:
+		if (LOWORD(wParam) == IDC_DEFAULT_CLOSE || LOWORD(wParam) == IDC_DEFAULT_END) {
+			UpdateAltBehaviorLabel(hDlg);
+			return (INT_PTR)TRUE;
+		}
 		if (LOWORD(wParam) == IDC_HOTKEY_ENABLE) {
 			BOOL enabled = IsDlgButtonChecked(hDlg, IDC_HOTKEY_ENABLE) == BST_CHECKED;
 			EnableWindow(GetDlgItem(hDlg, IDC_HOTKEY_KEY), enabled);
@@ -634,6 +680,8 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 		}
 		if (LOWORD(wParam) == IDOK) {
 			g_options.bAskConfirmation = IsDlgButtonChecked(hDlg, IDC_ASK_CONFIRM) == BST_CHECKED;
+			g_options.eDefaultBehavior = IsDlgButtonChecked(hDlg, IDC_DEFAULT_CLOSE) == BST_CHECKED
+				? KILL_CLOSE_WINDOW : KILL_END_PROCESS;
 			SetAutoStart(IsDlgButtonChecked(hDlg, IDC_START_WITH_WINDOWS) == BST_CHECKED);
 			GetDlgItemText(hDlg, IDC_CURSOR_PATH, g_options.wCursorPath, _countof(g_options.wCursorPath));
 			g_options.bHotkeyEnabled = IsDlgButtonChecked(hDlg, IDC_HOTKEY_ENABLE) == BST_CHECKED;
@@ -687,6 +735,7 @@ INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lPa
 void LoadOptions()
 {
 	g_options.bAskConfirmation = false;
+	g_options.eDefaultBehavior = KILL_END_PROCESS;
 	g_options.wCursorPath[0] = L'\0';
 	g_options.bHotkeyEnabled = true;
 	g_options.uHotkeyMods = MOD_WIN | MOD_SHIFT;
@@ -700,6 +749,12 @@ void LoadOptions()
 		if (RegQueryValueEx(hKey, L"AskConfirmation", NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS &&
 			dwType == REG_DWORD) {
 			g_options.bAskConfirmation = dwValue != 0;
+		}
+
+		dwSize = sizeof(dwValue);
+		if (RegQueryValueEx(hKey, L"DefaultBehavior", NULL, &dwType, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS &&
+			dwType == REG_DWORD) {
+			g_options.eDefaultBehavior = dwValue == KILL_CLOSE_WINDOW ? KILL_CLOSE_WINDOW : KILL_END_PROCESS;
 		}
 
 		DWORD dwPathSize = sizeof(g_options.wCursorPath);
@@ -739,6 +794,8 @@ void SaveOptions()
 	if (RegCreateKeyEx(HKEY_CURRENT_USER, g_wRegKey, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
 		DWORD dwValue = g_options.bAskConfirmation ? 1 : 0;
 		RegSetValueEx(hKey, L"AskConfirmation", 0, REG_DWORD, (const BYTE*)&dwValue, sizeof(dwValue));
+		dwValue = (DWORD)g_options.eDefaultBehavior;
+		RegSetValueEx(hKey, L"DefaultBehavior", 0, REG_DWORD, (const BYTE*)&dwValue, sizeof(dwValue));
 		RegSetValueEx(hKey, L"CursorPath", 0, REG_SZ, (const BYTE*)g_options.wCursorPath,
 			(lstrlen(g_options.wCursorPath) + 1) * sizeof(wchar_t));
 

@@ -21,6 +21,9 @@
 #define IDC_HOTKEY_KEY                  1006
 #define IDC_START_WITH_WINDOWS          1007
 #define IDC_CURSOR_PREVIEW              1008
+#define IDC_DEFAULT_CLOSE               1009
+#define IDC_DEFAULT_END                 1010
+#define IDC_ALT_BEHAVIOR_LABEL          1011
 
 #ifndef IDC_STATIC
 #define IDC_STATIC                      (-1)
@@ -32,7 +35,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        109
 #define _APS_NEXT_COMMAND_VALUE         40004
-#define _APS_NEXT_CONTROL_VALUE         1009
+#define _APS_NEXT_CONTROL_VALUE         1012
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif
