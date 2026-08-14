@@ -289,7 +289,7 @@ void UpdateAltBehaviorLabel(HWND hDlg)
 {
 	bool defaultClose = IsDlgButtonChecked(hDlg, IDC_DEFAULT_CLOSE) == BST_CHECKED;
 	SetDlgItemText(hDlg, IDC_ALT_BEHAVIOR_LABEL,
-		defaultClose ? L"[Alt] key - End Process" : L"[Alt] key - Close Window");
+		defaultClose ? L"[Alt] click behavior - End Process" : L"[Alt] click behavior - Close Window");
 }
 
 void HotkeyToText(UINT mods, UINT vk, wchar_t *buf, int cch)
