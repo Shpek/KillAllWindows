@@ -28,6 +28,7 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 void KillWindowUnderCursor(POINT pt, KillBehavior behavior);
 bool ConfirmAction(const wchar_t *prompt, const wchar_t *target);
+LRESULT CALLBACK MsgBoxCbtProc(int nCode, WPARAM wParam, LPARAM lParam);
 void UpdateAltBehaviorLabel(HWND hDlg);
 void AddTrayIcon(HWND hWnd);
 void RemoveTrayIcon();
@@ -50,10 +51,12 @@ HCURSOR g_hActiveKillCursor = NULL;
 HHOOK g_hMouseHook = NULL;
 HHOOK g_hKeyboardHook = NULL;
 HHOOK g_hCaptureHook = NULL;
+HHOOK g_hMsgBoxHook = NULL;
 NOTIFYICONDATA g_nidTrayIcon = { 0 };
 wchar_t g_wBuf[MAX_PATH];
 HWND g_hwndMain = NULL;
 HWND g_hwndOverlay = NULL;
+HWND g_hwndOptions = NULL;
 bool g_bDebugMode = false;
 bool g_bConfirming = false;
 bool g_bKillMode = false;
@@ -150,7 +153,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	case WM_COMMAND:
 		switch (LOWORD(wParam)) {
 		case IDM_OPTIONS:
-			if (DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_OPTIONS), hWnd, OptionsDlgProc) == IDOK) {
+			if (g_hwndOptions) {
+				SetForegroundWindow(g_hwndOptions);
+			} else if (DialogBox(g_hInstance, MAKEINTRESOURCE(IDD_OPTIONS), hWnd, OptionsDlgProc) == IDOK) {
 				ApplyHotkey(hWnd);
 			}
 			break;
@@ -445,6 +450,47 @@ void ExitKillMode()
 	}
 }
 
+// CBT hook that positions the confirmation box near the click (centered on
+// g_ptKill), clamped to the monitor under the click. MessageBox has no position arg.
+LRESULT CALLBACK MsgBoxCbtProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+	if (nCode == HCBT_ACTIVATE) {
+		HWND hMsgBox = (HWND)wParam;
+
+		RECT rc;
+		GetWindowRect(hMsgBox, &rc);
+		int w = rc.right - rc.left;
+		int h = rc.bottom - rc.top;
+		int x = g_ptKill.x - w / 2;
+		int y = g_ptKill.y - h / 2;
+
+		MONITORINFO mi = { sizeof(mi) };
+		if (GetMonitorInfo(MonitorFromPoint(g_ptKill, MONITOR_DEFAULTTONEAREST), &mi)) {
+			if (x < mi.rcWork.left) x = mi.rcWork.left;
+			if (y < mi.rcWork.top) y = mi.rcWork.top;
+			if (x + w > mi.rcWork.right) x = mi.rcWork.right - w;
+			if (y + h > mi.rcWork.bottom) y = mi.rcWork.bottom - h;
+		}
+
+		SetWindowPos(hMsgBox, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+		// Replace the standard icon with the app icon (0x0014 = the MessageBox icon control).
+		HWND hIconCtrl = GetDlgItem(hMsgBox, 0x0014);
+		if (hIconCtrl) {
+			SendMessage(hIconCtrl, STM_SETIMAGE, IMAGE_ICON,
+				(LPARAM)LoadIcon(g_hInstance, MAKEINTRESOURCE(IDI_ICON1)));
+		}
+
+		// Only position/skin once, when the box first opens (not on later re-activation).
+		if (g_hMsgBoxHook) {
+			UnhookWindowsHookEx(g_hMsgBoxHook);
+			g_hMsgBoxHook = NULL;
+		}
+	}
+
+	return CallNextHookEx(NULL, nCode, wParam, lParam);
+}
+
 // Returns true to proceed. Respects the "Ask for confirmation" option; when off,
 // always proceeds. g_bConfirming lets the input hooks pass through to the dialog.
 bool ConfirmAction(const wchar_t *prompt, const wchar_t *target)
@@ -457,8 +503,12 @@ bool ConfirmAction(const wchar_t *prompt, const wchar_t *target)
 	_snwprintf_s(msg, _countof(msg), _TRUNCATE, L"%s\n\n%s", prompt, target);
 
 	g_bConfirming = true;
+
+	// The hook removes itself once it has positioned the box (see MsgBoxCbtProc).
+	g_hMsgBoxHook = SetWindowsHookEx(WH_CBT, MsgBoxCbtProc, NULL, GetCurrentThreadId());
 	bool bConfirmed = MessageBox(NULL, msg, L"Kill All Windows",
 		MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND) == IDYES;
+
 	g_bConfirming = false;
 
 	return bConfirmed;
@@ -583,6 +633,8 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 	{
 	case WM_INITDIALOG:
 	{
+		g_hwndOptions = hDlg;
+
 		HICON hIcon = LoadIcon(g_hInstance, MAKEINTRESOURCE(IDI_ICON1));
 		SendMessage(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
 		SendMessage(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
@@ -706,6 +758,7 @@ INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
 		}
 		break;
 	case WM_DESTROY:
+		g_hwndOptions = NULL;
 		if (g_hCaptureHook) {
 			UnhookWindowsHookEx(g_hCaptureHook);
 			g_hCaptureHook = NULL;
